@@ -298,6 +298,21 @@ def fmt_age(sec):
     return f"hace {int(sec // 3600)}h"
 
 
+# Escala de severidad: verde -> verde-amarillo -> amarillo -> naranja-rojo -> rojo (0, 25, 50, 75, 100 %)
+_SCALE = [(0, (0x3d, 0xdc, 0x84)), (25, (0xa6, 0xd9, 0x4a)), (50, (0xf2, 0xc9, 0x4c)),
+          (75, (0xf0, 0x8a, 0x3c)), (100, (0xff, 0x52, 0x52))]
+
+
+def gauge_color(pct):
+    """Color del anillo interpolado entre los 5 tramos segun el porcentaje (tope en 0 y 100)."""
+    p = max(0.0, min(100.0, float(pct)))
+    for (p0, c0), (p1, c1) in zip(_SCALE, _SCALE[1:]):
+        if p <= p1:
+            t = (p - p0) / (p1 - p0)
+            return "#%02x%02x%02x" % tuple(round(a + (b - a) * t) for a, b in zip(c0, c1))
+    return "#%02x%02x%02x" % _SCALE[-1][1]
+
+
 def tone_for(pct, has_data):
     """Motita: accent normal, warning cerca del limite, danger por encima. Siempre con una palabra."""
     if not has_data:
@@ -504,7 +519,7 @@ def run_ui():
 
     def paint(sec, pct, has, val, unit, line1, line2, title=None):
         key, word = tone_for(pct, has)
-        color = TONES[key]
+        color = gauge_color(pct) if has else TONES[key]
         data, cx, cy = render_ring(GW, GH, pct / 100.0, color, TRACK, SURF, px(8))
         sec["img"].put(data, to=(0, 0))
         c = sec["cv"]
