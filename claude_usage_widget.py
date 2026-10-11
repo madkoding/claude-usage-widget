@@ -605,9 +605,9 @@ def run_ui():
         elif reason == "token_expired":
             foot2.config(text="token caducado \u00b7 abre `claude` una vez", fg=TONES["warning"])
         elif reason == "oauth_429":
-            nxt = fstate["next"]
-            when = f" a las {datetime.fromtimestamp(nxt):%H:%M}" if nxt > time.time() else ""
-            foot2.config(text=f"API de uso limitada (429) \u00b7 reintenta{when}", fg=TONES["warning"])
+            nxt = fstate["next"] or st.get("ts", 0) + (st.get("retry_after") or 0)
+            when = f" {datetime.fromtimestamp(nxt):%H:%M}" if nxt > time.time() else ""
+            foot2.config(text=f"uso limitado (429) \u00b7 reintenta{when}", fg=TONES["warning"])
         elif st.get("ok") is False and reason not in (None, "login_closed"):
             foot2.config(text=f"no pude leer claude.ai ({reason}) \u00b7 ver fetch.log", fg=TONES["warning"])
 
