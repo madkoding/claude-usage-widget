@@ -1,5 +1,9 @@
 # claude-usage-widget
 
+![Vista ilustrativa del widget](docs/preview.png)
+
+*Imagen ilustrativa con datos de ejemplo, no es una captura real.*
+
 Widget de escritorio para Windows (Python + tkinter) que muestra tu uso de Claude con gauges circulares antialiased y estilo Motita (tema oscuro).
 
 ## Qué muestra
@@ -18,8 +22,11 @@ Widget de escritorio para Windows (Python + tkinter) que muestra tu uso de Claud
 
 Los datos se guardan en `%APPDATA%\claude-usage-widget-motita`.
 
-## Fuentes (opcional)
-Usa Sansation y JetBrains Mono Nerd Font si están en `claude_usage_widget_fonts/` junto al script; si no, cae a fuentes del sistema. No se incluyen por sus licencias.
+## Fuentes
+Incluye Sansation y JetBrains Mono Nerd Font (SIL OFL 1.1) en `claude_usage_widget_fonts/`; ver `NOTICE.md` y `OFL.txt`.
 
 ## Aviso
 Proyecto no oficial, sin relación con Anthropic. Úsalo bajo tu responsabilidad.
+
+## Licencia
+MIT (ver `LICENSE`). Las fuentes mantienen su propia licencia OFL.
