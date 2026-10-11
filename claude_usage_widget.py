@@ -216,6 +216,13 @@ def read_rate(path=None):
     return load_rate(path)[0]
 
 
+def fetch_delay(every, fails=0, retry_after=0):
+    """Segundos hasta el proximo fetch: base (min 120 s) x2 por fallo seguido (hasta x16), o Retry-After (tope 1 h) si es mayor. 0 = desactivado."""
+    if every <= 0:
+        return 0
+    return max(max(120, every) * 2 ** min(fails, 4), min(retry_after or 0, 3600))
+
+
 def read_status():
     """Resultado del ultimo intento del lector: {ok, reason, ts}."""
     return _read_json(STATUS_PATH) or {}
@@ -650,16 +657,13 @@ def run_ui():
         p = fstate["proc"]
         if p is not None and p.poll() is None:
             return
-        every = int(cfg["fetch_every_s"])
-        every = max(120, every) if every > 0 else 0  # 0 desactiva; minimo 2 min (la API de uso limita con 429)
         if p is not None and not fstate.get("seen"):  # resultado del ultimo fetch: backoff exponencial si fallo
             fstate["seen"] = True
             st = read_status()
             fstate["fails"] = 0 if st.get("ok") else min(fstate["fails"] + 1, 4)
             ra = st.get("retry_after")
             fstate["retry"] = ra if not st.get("ok") and isinstance(ra, (int, float)) else 0
-        every *= 2 ** fstate["fails"]  # 5 -> 10 -> 20 -> 40 -> 80 min tras fallos seguidos
-        every = max(every, min(fstate["retry"], 3600)) if every > 0 else 0  # respeta Retry-After (tope 1 h)
+        every = fetch_delay(int(cfg["fetch_every_s"]), fstate["fails"], fstate["retry"])
         fstate["next"] = fstate["last"] + every if every > 0 else 0.0
         if force and time.time() - fstate["forced"] < 60:  # forzar: maximo una vez por minuto
             return
