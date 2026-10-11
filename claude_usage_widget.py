@@ -230,9 +230,10 @@ def read_status():
 
 def spawn_fetch(login=False):
     """Lanza claude_usage_fetch.py sin ventana de consola (con --login muestra la ventana de inicio de sesion)."""
-    if not FETCH.exists():
+    if not getattr(sys, "frozen", False) and not FETCH.exists():
         return None
-    args = [sys.executable, str(FETCH)] + (["--login"] if login else [])
+    base = [sys.executable, "--fetch"] if getattr(sys, "frozen", False) else [sys.executable, str(FETCH)]
+    args = base + (["--login"] if login else [])
     try:
         return subprocess.Popen(args, creationflags=0x08000000 if sys.platform == "win32" else 0,  # NO_WINDOW
                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -726,4 +727,7 @@ def run_ui():
 
 
 if __name__ == "__main__":
+    if "--fetch" in sys.argv:  # el .exe se relanza a si mismo como lector (sin python ni scripts sueltos)
+        import claude_usage_fetch
+        sys.exit(claude_usage_fetch.main(sys.argv[1:]))
     run_ui()
