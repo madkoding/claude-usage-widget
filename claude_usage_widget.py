@@ -15,7 +15,7 @@ Fuentes de datos:
 
 Config opcional en %APPDATA%/claude-usage-widget-motita/config.json:
   {"block_limit": 0, "week_limit": 0, "day_limit": 0,
-   "refresh_s": 30, "fetch_every_s": 60, "opacity": 0.96, "height": 0,
+   "refresh_s": 30, "fetch_every_s": 300, "opacity": 0.96, "height": 0,
    "extra_roots": ["D:/ruta/a/projects"], "wsl_distro": "Ubuntu"}
   ("wsl_distro" activa leer los logs dentro de WSL; puede arrancar esa distro.)
 
@@ -46,7 +46,7 @@ STATUS_PATH = APP_DIR / "fetch_status.json"
 FETCH = HERE / "claude_usage_fetch.py"
 DEFAULTS = {"x": None, "y": None, "refresh_s": 30, "block_limit": 0, "week_limit": 0,
             "day_limit": 0, "opacity": 0.96, "height": 0, "extra_roots": [], "wsl_distro": "",
-            "fetch_every_s": 60}
+            "fetch_every_s": 300}
 
 # Tokens Motita (tokens.css, dark only)
 BASE, SURF = "#0a0a0f", "#16161e"
@@ -642,14 +642,18 @@ def run_ui():
         root.after(max(5, int(cfg["refresh_s"])) * 1000, tick)
 
     # lector del plan real (claude_usage_fetch.py): cada fetch_every_s, sin solaparse
-    fstate = {"proc": None, "last": 0.0, "auto_login": False}
+    fstate = {"proc": None, "last": 0.0, "auto_login": False, "fails": 0}
 
     def fetch_tick(force=False, login=False):
         p = fstate["proc"]
         if p is not None and p.poll() is None:
             return
         every = int(cfg["fetch_every_s"])
-        every = max(30, every) if every > 0 else 0  # 0 desactiva; minimo 30 s
+        every = max(120, every) if every > 0 else 0  # 0 desactiva; minimo 2 min (la API de uso limita con 429)
+        if p is not None and not fstate.get("seen"):  # resultado del ultimo fetch: backoff exponencial si fallo
+            fstate["seen"] = True
+            fstate["fails"] = 0 if read_status().get("ok") else min(fstate["fails"] + 1, 4)
+        every *= 2 ** fstate["fails"]  # 5 -> 10 -> 20 -> 40 -> 80 min tras fallos seguidos
         if not force and (every <= 0 or time.time() - fstate["last"] < every):
             return
         reason = read_status().get("reason")
@@ -657,7 +661,7 @@ def run_ui():
             if fstate["auto_login"]:  # la ventana de login se ofrece sola una vez por arranque
                 return
             fstate["auto_login"], login = True, True
-        fstate["last"] = time.time()
+        fstate["last"], fstate["seen"] = time.time(), False
         fstate["proc"] = spawn_fetch(login)
 
     # arrastrar + menu contextual en todos los widgets
