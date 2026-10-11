@@ -692,7 +692,6 @@ def run_ui():
     menu = tk.Menu(root, tearoff=0)
     menu.add_command(label="Actualizar ahora", command=lambda: (_file_cache.clear(), refresh()))
     menu.add_command(label="Actualizar plan real ahora", command=lambda: fetch_tick(force=True))
-    menu.add_command(label="Conectar claude.ai (iniciar sesión)", command=lambda: fetch_tick(force=True, login=True))
     menu.add_separator()
     menu.add_command(label="Cerrar", command=root.destroy)
 
