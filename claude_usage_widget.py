@@ -15,7 +15,7 @@ Fuentes de datos:
 
 Config opcional en %APPDATA%/claude-usage-widget-motita/config.json:
   {"block_limit": 0, "week_limit": 0, "day_limit": 0,
-   "refresh_s": 30, "fetch_every_s": 60, "opacity": 0.96, "height": 0,
+   "refresh_s": 30, "fetch_every_s": 300, "opacity": 0.96, "height": 0,
    "extra_roots": ["D:/ruta/a/projects"], "wsl_distro": "Ubuntu"}
   ("wsl_distro" activa leer los logs dentro de WSL; puede arrancar esa distro.)
 
@@ -46,7 +46,7 @@ STATUS_PATH = APP_DIR / "fetch_status.json"
 FETCH = HERE / "claude_usage_fetch.py"
 DEFAULTS = {"x": None, "y": None, "refresh_s": 30, "block_limit": 0, "week_limit": 0,
             "day_limit": 0, "opacity": 0.96, "height": 0, "extra_roots": [], "wsl_distro": "",
-            "fetch_every_s": 60}
+            "fetch_every_s": 300}
 
 # Tokens Motita (tokens.css, dark only)
 BASE, SURF = "#0a0a0f", "#16161e"
@@ -216,6 +216,13 @@ def read_rate(path=None):
     return load_rate(path)[0]
 
 
+def fetch_delay(every, fails=0, retry_after=0):
+    """Segundos hasta el proximo fetch: base (min 120 s) x2 por fallo seguido (hasta x16), o Retry-After (tope 1 h) si es mayor. 0 = desactivado."""
+    if every <= 0:
+        return 0
+    return max(max(120, every) * 2 ** min(fails, 4), min(retry_after or 0, 3600))
+
+
 def read_status():
     """Resultado del ultimo intento del lector: {ok, reason, ts}."""
     return _read_json(STATUS_PATH) or {}
@@ -223,9 +230,10 @@ def read_status():
 
 def spawn_fetch(login=False):
     """Lanza claude_usage_fetch.py sin ventana de consola (con --login muestra la ventana de inicio de sesion)."""
-    if not FETCH.exists():
+    if not getattr(sys, "frozen", False) and not FETCH.exists():
         return None
-    args = [sys.executable, str(FETCH)] + (["--login"] if login else [])
+    base = [sys.executable, "--fetch"] if getattr(sys, "frozen", False) else [sys.executable, str(FETCH)]
+    args = base + (["--login"] if login else [])
     try:
         return subprocess.Popen(args, creationflags=0x08000000 if sys.platform == "win32" else 0,  # NO_WINDOW
                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -605,7 +613,9 @@ def run_ui():
         elif reason == "token_expired":
             foot2.config(text="token caducado \u00b7 abre `claude` una vez", fg=TONES["warning"])
         elif reason == "oauth_429":
-            foot2.config(text="API de uso limitada (429) \u00b7 reintenta solo", fg=TONES["warning"])
+            nxt = fstate["next"] or st.get("ts", 0) + (st.get("retry_after") or 0)
+            when = f" {datetime.fromtimestamp(nxt):%H:%M}" if nxt > time.time() else ""
+            foot2.config(text=f"uso limitado (429) \u00b7 reintenta{when}", fg=TONES["warning"])
         elif st.get("ok") is False and reason not in (None, "login_closed"):
             foot2.config(text=f"no pude leer claude.ai ({reason}) \u00b7 ver fetch.log", fg=TONES["warning"])
 
@@ -642,22 +652,33 @@ def run_ui():
         root.after(max(5, int(cfg["refresh_s"])) * 1000, tick)
 
     # lector del plan real (claude_usage_fetch.py): cada fetch_every_s, sin solaparse
-    fstate = {"proc": None, "last": 0.0, "auto_login": False}
+    fstate = {"proc": None, "last": 0.0, "auto_login": False, "fails": 0, "retry": 0, "next": 0.0, "forced": 0.0}
 
     def fetch_tick(force=False, login=False):
         p = fstate["proc"]
         if p is not None and p.poll() is None:
             return
-        every = int(cfg["fetch_every_s"])
-        every = max(30, every) if every > 0 else 0  # 0 desactiva; minimo 30 s
+        if p is not None and not fstate.get("seen"):  # resultado del ultimo fetch: backoff exponencial si fallo
+            fstate["seen"] = True
+            st = read_status()
+            fstate["fails"] = 0 if st.get("ok") else min(fstate["fails"] + 1, 4)
+            ra = st.get("retry_after")
+            fstate["retry"] = ra if not st.get("ok") and isinstance(ra, (int, float)) else 0
+        every = fetch_delay(int(cfg["fetch_every_s"]), fstate["fails"], fstate["retry"])
+        fstate["next"] = fstate["last"] + every if every > 0 else 0.0
+        if force and time.time() - fstate["forced"] < 60:  # forzar: maximo una vez por minuto
+            return
         if not force and (every <= 0 or time.time() - fstate["last"] < every):
             return
+        if force:
+            fstate["forced"] = time.time()
         reason = read_status().get("reason")
         if not force and reason == "login_required":
             if fstate["auto_login"]:  # la ventana de login se ofrece sola una vez por arranque
                 return
             fstate["auto_login"], login = True, True
-        fstate["last"] = time.time()
+        fstate["last"], fstate["seen"] = time.time(), False
+        fstate["next"] = 0.0
         fstate["proc"] = spawn_fetch(login)
 
     # arrastrar + menu contextual en todos los widgets
@@ -676,7 +697,6 @@ def run_ui():
     menu = tk.Menu(root, tearoff=0)
     menu.add_command(label="Actualizar ahora", command=lambda: (_file_cache.clear(), refresh()))
     menu.add_command(label="Actualizar plan real ahora", command=lambda: fetch_tick(force=True))
-    menu.add_command(label="Conectar claude.ai (iniciar sesión)", command=lambda: fetch_tick(force=True, login=True))
     menu.add_separator()
     menu.add_command(label="Cerrar", command=root.destroy)
 
@@ -707,4 +727,7 @@ def run_ui():
 
 
 if __name__ == "__main__":
+    if "--fetch" in sys.argv:  # el .exe se relanza a si mismo como lector (sin python ni scripts sueltos)
+        import claude_usage_fetch
+        sys.exit(claude_usage_fetch.main(sys.argv[1:]))
     run_ui()
