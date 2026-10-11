@@ -144,9 +144,12 @@ def _write(path, obj):
     os.replace(tmp, path)
 
 
+RETRY_AFTER = [None]  # segundos pedidos por la API en un 429 (header Retry-After)
+
+
 def status(ok, reason):
     try:
-        _write(STATUS, {"ts": time.time(), "ok": ok, "reason": reason})
+        _write(STATUS, {"ts": time.time(), "ok": ok, "reason": reason, "retry_after": None if ok else RETRY_AFTER[0]})
     except Exception:
         pass
 
@@ -225,6 +228,10 @@ def fetch_oauth():
             js = json.loads(r.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         log(f"oauth usage HTTP {e.code}: {e.read()[:300]!r}")
+        try:
+            RETRY_AFTER[0] = max(0, int(e.headers.get("Retry-After")))
+        except Exception:
+            RETRY_AFTER[0] = None
         return 1, "oauth_429" if e.code == 429 else f"oauth_http_{e.code}"
     except Exception as ex:
         log(f"oauth usage error: {ex}")

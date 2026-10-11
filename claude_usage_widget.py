@@ -605,7 +605,9 @@ def run_ui():
         elif reason == "token_expired":
             foot2.config(text="token caducado \u00b7 abre `claude` una vez", fg=TONES["warning"])
         elif reason == "oauth_429":
-            foot2.config(text="API de uso limitada (429) \u00b7 reintenta solo", fg=TONES["warning"])
+            nxt = fstate["next"]
+            when = f" a las {datetime.fromtimestamp(nxt):%H:%M}" if nxt > time.time() else ""
+            foot2.config(text=f"API de uso limitada (429) \u00b7 reintenta{when}", fg=TONES["warning"])
         elif st.get("ok") is False and reason not in (None, "login_closed"):
             foot2.config(text=f"no pude leer claude.ai ({reason}) \u00b7 ver fetch.log", fg=TONES["warning"])
 
@@ -642,7 +644,7 @@ def run_ui():
         root.after(max(5, int(cfg["refresh_s"])) * 1000, tick)
 
     # lector del plan real (claude_usage_fetch.py): cada fetch_every_s, sin solaparse
-    fstate = {"proc": None, "last": 0.0, "auto_login": False, "fails": 0}
+    fstate = {"proc": None, "last": 0.0, "auto_login": False, "fails": 0, "retry": 0, "next": 0.0, "forced": 0.0}
 
     def fetch_tick(force=False, login=False):
         p = fstate["proc"]
@@ -652,16 +654,26 @@ def run_ui():
         every = max(120, every) if every > 0 else 0  # 0 desactiva; minimo 2 min (la API de uso limita con 429)
         if p is not None and not fstate.get("seen"):  # resultado del ultimo fetch: backoff exponencial si fallo
             fstate["seen"] = True
-            fstate["fails"] = 0 if read_status().get("ok") else min(fstate["fails"] + 1, 4)
+            st = read_status()
+            fstate["fails"] = 0 if st.get("ok") else min(fstate["fails"] + 1, 4)
+            ra = st.get("retry_after")
+            fstate["retry"] = ra if not st.get("ok") and isinstance(ra, (int, float)) else 0
         every *= 2 ** fstate["fails"]  # 5 -> 10 -> 20 -> 40 -> 80 min tras fallos seguidos
+        every = max(every, min(fstate["retry"], 3600)) if every > 0 else 0  # respeta Retry-After (tope 1 h)
+        fstate["next"] = fstate["last"] + every if every > 0 else 0.0
+        if force and time.time() - fstate["forced"] < 60:  # forzar: maximo una vez por minuto
+            return
         if not force and (every <= 0 or time.time() - fstate["last"] < every):
             return
+        if force:
+            fstate["forced"] = time.time()
         reason = read_status().get("reason")
         if not force and reason == "login_required":
             if fstate["auto_login"]:  # la ventana de login se ofrece sola una vez por arranque
                 return
             fstate["auto_login"], login = True, True
         fstate["last"], fstate["seen"] = time.time(), False
+        fstate["next"] = 0.0
         fstate["proc"] = spawn_fetch(login)
 
     # arrastrar + menu contextual en todos los widgets
