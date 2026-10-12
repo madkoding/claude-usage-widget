@@ -18,7 +18,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - run: python -m unittest -v test_fetch_delay
+      - run: python -m unittest -v test_fetch_delay test_widget_logic
       - run: python -m pip install pyinstaller
       - name: Build exe
         run: >

@@ -9,13 +9,18 @@ Fuentes de datos:
      %APPDATA%/claude-usage-widget-motita/rate_limits.json (solo suscriptores Pro/Max).
   2) Estimado local: tokens leidos de los logs de Claude Code
      (~/.claude/projects/**/*.jsonl), como % de tu pico de 30 dias.
-  La tercera gauge es "Fable 7d" (real) si hay dato; si no, "Hoy" (estimado local).
+  Menu hamburguesa (o clic derecho): siempre encima, bloquear posicion, opacidad, tamano, modo
+  compacto, gauge de Fable (opcional), anclar a esquina, alertas, iniciar con Windows.
+  Se redimensiona arrastrando la esquina inferior derecha o con Ctrl+rueda (conserva la proporcion).
+  Atajo global (Windows): Ctrl+Alt+U oculta/muestra el widget.
   Sin Claude Code local, rate_limits.json (junto al script o en %APPDATA%) se genera leyendo
   claude.ai/settings/usage; las ventanas caducan solas al llegar su hora de reinicio.
 
 Config opcional en %APPDATA%/claude-usage-widget-motita/config.json:
-  {"block_limit": 0, "week_limit": 0, "day_limit": 0,
-   "refresh_s": 30, "fetch_every_s": 300, "opacity": 0.96, "height": 0,
+  {"block_limit": 0, "week_limit": 0,
+   "refresh_s": 30, "fetch_every_s": 300, "opacity": 0.96, "scale": 1.0,
+   "topmost": true, "locked": false, "compact": false, "show_fable": false,
+   "alerts": true, "alert_pct": 80,
    "extra_roots": ["D:/ruta/a/projects"], "wsl_distro": "Ubuntu"}
   ("wsl_distro" activa leer los logs dentro de WSL; puede arrancar esa distro.)
 
@@ -45,8 +50,10 @@ RATE_PATH = APP_DIR / "rate_limits.json"
 STATUS_PATH = APP_DIR / "fetch_status.json"
 FETCH = HERE / "claude_usage_fetch.py"
 DEFAULTS = {"x": None, "y": None, "refresh_s": 30, "block_limit": 0, "week_limit": 0,
-            "day_limit": 0, "opacity": 0.96, "height": 0, "extra_roots": [], "wsl_distro": "",
-            "fetch_every_s": 300}
+            "opacity": 0.96, "scale": 1.0, "topmost": True, "locked": False, "compact": False,
+            "show_fable": False, "alerts": True, "alert_pct": 80,
+            "extra_roots": [], "wsl_distro": "", "fetch_every_s": 300}
+SCALE_MIN, SCALE_MAX = 0.6, 2.5
 
 # Tokens Motita (tokens.css, dark only)
 BASE, SURF = "#0a0a0f", "#16161e"
@@ -252,11 +259,10 @@ def compute(cfg=None, now=None):
     block_work = total(active[2])[0] if active else 0
     peak_block = max((total(b[2])[0] for b in blocks), default=0)
 
-    daily, msgs = {}, {}
+    daily = {}
     for e in es:
         d = e[0].astimezone().date()
         daily[d] = daily.get(d, 0) + e[2] + e[3] + e[4]
-        msgs[d] = msgs.get(d, 0) + 1
     today = datetime.now().astimezone().date()
 
     def wsum(d):
@@ -271,9 +277,6 @@ def compute(cfg=None, now=None):
         "week_work": week_work,
         "cache_week": sum(e[5] for e in es if e[0] >= now - timedelta(days=7)),
         "peak_week": max([wsum(d) for d in daily] + [week_work]),
-        "today_work": daily.get(today, 0),
-        "today_msgs": msgs.get(today, 0),
-        "peak_day": max(list(daily.values()) + [0]),
         "rate": rate,
         "rate_meta": meta,
         "sources": len(roots),
@@ -404,6 +407,91 @@ def render_ring(w, h, frac, arc_hex, track_hex, bg_hex, stroke_px=8):
     return "{" + "} {".join(rows) + "}", cx, cy
 
 
+def alert_step(armed, pct, has, th):
+    """Histeresis de la alerta. armed = ya aviso (o ya estaba sobre el umbral). Devuelve (armed, avisar)."""
+    over = has and pct >= th
+    if over and not armed:
+        return True, True
+    if not has or pct < th - 10:
+        return False, False
+    return armed, False
+
+
+# ---------- inicio con Windows / atajo global ----------
+RUN_KEY, RUN_NAME = r"Software\Microsoft\Windows\CurrentVersion\Run", "ClaudeUsageWidget"
+
+
+def autostart_cmd():
+    if getattr(sys, "frozen", False):
+        return f'"{sys.executable}"'
+    exe = Path(sys.executable)
+    pyw = exe.with_name("pythonw.exe")
+    return f'"{pyw if pyw.exists() else exe}" "{Path(__file__).resolve()}"'
+
+
+def autostart_get():
+    if sys.platform != "win32":
+        return False
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
+            return bool(winreg.QueryValueEx(k, RUN_NAME)[0])
+    except OSError:
+        return False
+
+
+def autostart_set(on):
+    if sys.platform != "win32":
+        return
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
+            if on:
+                winreg.SetValueEx(k, RUN_NAME, 0, winreg.REG_SZ, autostart_cmd())
+            else:
+                winreg.DeleteValue(k, RUN_NAME)
+    except OSError:
+        pass
+
+
+def start_hotkey(q, mods=0x1 | 0x2 | 0x4000, vk=0x55):
+    """Ctrl+Alt+U global (Windows): un hilo con su bucle de mensajes avisa por la cola."""
+    if sys.platform != "win32":
+        return
+
+    def loop():
+        import ctypes
+        from ctypes import wintypes
+        u = ctypes.windll.user32
+        if not u.RegisterHotKey(None, 1, mods, vk):
+            return
+        m = wintypes.MSG()
+        while u.GetMessageW(ctypes.byref(m), None, 0, 0) > 0:
+            if m.message == 0x0312:  # WM_HOTKEY
+                q.put("toggle")
+
+    threading.Thread(target=loop, daemon=True).start()
+
+
+def start_tray(q):
+    """Icono en la bandeja (opcional: requiere pystray y Pillow). Devuelve True si arranco."""
+    try:
+        import pystray
+        from PIL import Image, ImageDraw
+    except Exception:
+        return False
+    img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.ellipse((6, 6, 58, 58), outline=TONES["accent"], width=8)
+    d.ellipse((24, 26, 30, 32), fill=TONES["accent"])
+    d.ellipse((36, 26, 42, 32), fill=TONES["accent"])
+    menu = pystray.Menu(pystray.MenuItem("Mostrar / ocultar", lambda: q.put("toggle"), default=True),
+                        pystray.MenuItem("Salir", lambda: q.put("quit")))
+    icon = pystray.Icon("claude-usage", img, "Claude usage", menu)
+    icon.run_detached()
+    return True
+
+
 # ---------- UI ----------
 def _enable_dpi():
     if sys.platform == "win32":
@@ -436,7 +524,7 @@ def run_ui():
     root = tk.Tk()
     root.title("Claude usage")
     root.overrideredirect(True)
-    root.attributes("-topmost", True)
+    root.attributes("-topmost", bool(cfg["topmost"]))
     try:
         root.attributes("-alpha", float(cfg["opacity"]))
     except Exception:
@@ -444,91 +532,156 @@ def run_ui():
     root.configure(bg=BORDER)
 
     S = root.winfo_fpixels("1i") / 96.0
+    sc = {"v": min(max(_num(cfg["scale"]) or 1.0, SCALE_MIN), SCALE_MAX)}
 
     def px(n):
-        return int(round(n * S))
+        return int(round(n * S * sc["v"]))
 
     fams = set(tkfont.families(root))
     sans = "Sansation" if "Sansation" in fams else "Segoe UI"
     mono = next((f for f in sorted(fams) if f.lower().startswith("jetbrainsmono")), None) or "Consolas"
 
-    def F(fam, size, bold=False):
-        return tkfont.Font(root=root, family=fam, size=-px(size), weight="bold" if bold else "normal")
+    specs = {"title": (mono, 12, True), "close": (sans, 18, False), "label": (mono, 11, True),
+             "word": (mono, 10, True), "fig": (sans, 28, True), "unit": (sans, 14, False),
+             "val": (sans, 16, True), "tok": (sans, 12, False), "cap": (sans, 12, False),
+             "meta": (sans, 10, False)}
+    fonts = {k: tkfont.Font(root=root, family=f, size=-10, weight="bold" if b else "normal")
+             for k, (f, _, b) in specs.items()}
+    f_fig, f_unit = fonts["fig"], fonts["unit"]
 
-    f_title, f_close = F(mono, 12, True), F(sans, 18)
-    f_label, f_word = F(mono, 11, True), F(mono, 10, True)
-    f_fig, f_unit = F(sans, 28, True), F(sans, 14)
-    f_val, f_tok = F(sans, 16, True), F(sans, 12)
-    f_cap, f_meta = F(sans, 12), F(sans, 10)
+    def refont():
+        for k, (_, size, _b) in specs.items():
+            fonts[k].configure(size=-px(size))
 
-    W = px(248)
-    GW = W - 2 - 2 * px(16)
-    GH = px(136)
+    refont()
 
     inner = tk.Frame(root, bg=SURF)
     inner.pack(fill="both", expand=True, padx=1, pady=1)
+    ui = {}  # widgets que se reconstruyen al cambiar de tamano
 
-    # cabecera: marca (aproximada) + titulo + cerrar
-    head = tk.Frame(inner, bg=SURF)
-    head.pack(fill="x", padx=px(16), pady=(px(14), px(4)))
-    ms = px(22)
-    mark = tk.Canvas(head, width=ms, height=ms, bg=SURF, highlightthickness=0, bd=0)
-    mark.pack(side="left")
-    k = ms / 32.0
-    pts = [(7, 25), (5, 13), (7, 5), (13, 10), (19, 10), (25, 5), (27, 13), (25, 25), (21, 27), (11, 27), (7, 25)]
-    mark.create_line(*[v * k for p in pts for v in p], fill=TONES["accent"], width=max(2, int(round(2 * k))),
-                     joinstyle="round", capstyle="round")
-    for ex in (12, 20):
-        mark.create_oval((ex - 1.6) * k, (17 - 1.6) * k, (ex + 1.6) * k, (17 + 1.6) * k,
-                         fill=TONES["accent"], outline=TONES["accent"])
-    tk.Label(head, text="CLAUDE USAGE", font=f_title, fg=FG, bg=SURF).pack(side="left", padx=(px(8), 0))
-    close = tk.Label(head, text="\u00d7", font=f_close, fg=MUTED, bg=SURF, cursor="hand2")
-    close.pack(side="right")
-    close.bind("<Button-1>", lambda e: root.destroy())
-    close.bind("<Enter>", lambda e: close.config(fg=FG))
-    close.bind("<Leave>", lambda e: close.config(fg=MUTED))
+    def build():
+        for ch in inner.winfo_children():
+            ch.destroy()
+        ui["W"] = px(200 if cfg["compact"] else 248)
+        ui["GW"] = GW = ui["W"] - 2 - 2 * px(16)
+        ui["GH"] = GH = px(136)
 
-    def hairline():
-        tk.Frame(inner, height=1, bg=BORDER).pack(fill="x", padx=px(16), pady=(px(6), 0))
+        # cabecera: menu hamburguesa + marca (aproximada) + titulo + cerrar
+        head = tk.Frame(inner, bg=SURF)
+        head.pack(fill="x", padx=px(16), pady=(px(14), px(4)))
+        ham = tk.Label(head, text="\u2630", font=fonts["close"], fg=MUTED, bg=SURF, cursor="hand2")
+        ham.pack(side="left", padx=(0, px(8)))
+        ham.bind("<Button-1>", lambda e: menu.tk_popup(ham.winfo_rootx(), ham.winfo_rooty() + ham.winfo_height()))
+        ham.bind("<Enter>", lambda e: ham.config(fg=FG))
+        ham.bind("<Leave>", lambda e: ham.config(fg=MUTED))
+        ms = px(22)
+        mark = tk.Canvas(head, width=ms, height=ms, bg=SURF, highlightthickness=0, bd=0)
+        mark.pack(side="left")
+        k = ms / 32.0
+        pts = [(7, 25), (5, 13), (7, 5), (13, 10), (19, 10), (25, 5), (27, 13), (25, 25), (21, 27), (11, 27),
+               (7, 25)]
+        mark.create_line(*[v * k for p in pts for v in p], fill=TONES["accent"], width=max(2, int(round(2 * k))),
+                         joinstyle="round", capstyle="round")
+        for ex in (12, 20):
+            mark.create_oval((ex - 1.6) * k, (17 - 1.6) * k, (ex + 1.6) * k, (17 + 1.6) * k,
+                             fill=TONES["accent"], outline=TONES["accent"])
+        tk.Label(head, text="CLAUDE USAGE", font=fonts["title"], fg=FG, bg=SURF).pack(side="left", padx=(px(8), 0))
+        close = tk.Label(head, text="\u00d7", font=fonts["close"], fg=MUTED, bg=SURF, cursor="hand2")
+        close.pack(side="right")
+        close.bind("<Button-1>", lambda e: quit_app())
+        close.bind("<Enter>", lambda e: close.config(fg=FG))
+        close.bind("<Leave>", lambda e: close.config(fg=MUTED))
 
-    def section(title):
+        def hairline():
+            tk.Frame(inner, height=1, bg=BORDER).pack(fill="x", padx=px(16), pady=(px(6), 0))
+
+        def section(title):
+            hairline()
+            f = tk.Frame(inner, bg=SURF)
+            f.pack(fill="x", padx=px(16), pady=(px(10), px(4)))
+            row = tk.Frame(f, bg=SURF)
+            row.pack(fill="x")
+            ttl = tk.Label(row, text=title, font=fonts["label"], fg=MUTED, bg=SURF)
+            ttl.pack(side="left")
+            word = tk.Label(row, text="", font=fonts["word"], fg=MUTED, bg=SURF)
+            word.pack(side="right")
+            cv = tk.Canvas(f, width=GW, height=GH, bg=SURF, highlightthickness=0, bd=0)
+            cv.pack(pady=(px(8), px(4)))
+            img = tk.PhotoImage(master=root, width=GW, height=GH)
+            vr = tk.Frame(f, bg=SURF)
+            vr.pack()
+            val = tk.Label(vr, text="0", font=fonts["val"], fg=FG, bg=SURF)
+            val.pack(side="left")
+            unit = tk.Label(vr, text="tokens", font=fonts["tok"], fg=MUTED, bg=SURF)
+            unit.pack(side="left", padx=(px(4), 0), pady=(px(2), 0))
+            d1 = tk.Label(f, text="", font=fonts["cap"], fg=MUTED, bg=SURF)
+            d1.pack()
+            d2 = tk.Label(f, text="", font=fonts["meta"], fg=MUTED, bg=SURF)
+            d2.pack()
+            return {"cv": cv, "img": img, "title": ttl, "word": word, "val": val, "unit": unit, "d1": d1, "d2": d2}
+
+        def line(title):  # modo compacto: titulo y porcentaje en una sola linea
+            hairline()
+            row = tk.Frame(inner, bg=SURF)
+            row.pack(fill="x", padx=px(16), pady=(px(8), px(2)))
+            ttl = tk.Label(row, text=title, font=fonts["label"], fg=MUTED, bg=SURF)
+            ttl.pack(side="left")
+            pct = tk.Label(row, text="\u2013", font=fonts["val"], fg=FG, bg=SURF)
+            pct.pack(side="right")
+            return {"compact": True, "title": ttl, "pct": pct}
+
+        make = line if cfg["compact"] else section
+        ui["block"] = make("SESI\u00d3N 5H")
+        ui["week"] = make("SEMANA \u00b7 7D")
+        ui.pop("fable", None)
+        if cfg["show_fable"]:
+            ui["fable"] = make("FABLE \u00b7 7D")
         hairline()
-        f = tk.Frame(inner, bg=SURF)
-        f.pack(fill="x", padx=px(16), pady=(px(10), px(4)))
-        row = tk.Frame(f, bg=SURF)
-        row.pack(fill="x")
-        ttl = tk.Label(row, text=title, font=f_label, fg=MUTED, bg=SURF)
-        ttl.pack(side="left")
-        word = tk.Label(row, text="", font=f_word, fg=MUTED, bg=SURF)
-        word.pack(side="right")
-        cv = tk.Canvas(f, width=GW, height=GH, bg=SURF, highlightthickness=0, bd=0)
-        cv.pack(pady=(px(8), px(4)))
-        img = tk.PhotoImage(master=root, width=GW, height=GH)
-        vr = tk.Frame(f, bg=SURF)
-        vr.pack()
-        val = tk.Label(vr, text="0", font=f_val, fg=FG, bg=SURF)
-        val.pack(side="left")
-        unit = tk.Label(vr, text="tokens", font=f_tok, fg=MUTED, bg=SURF)
-        unit.pack(side="left", padx=(px(4), 0), pady=(px(2), 0))
-        d1 = tk.Label(f, text="", font=f_cap, fg=MUTED, bg=SURF)
-        d1.pack()
-        d2 = tk.Label(f, text="", font=f_meta, fg=MUTED, bg=SURF)
-        d2.pack()
-        return {"cv": cv, "img": img, "title": ttl, "word": word, "val": val, "unit": unit, "d1": d1, "d2": d2}
+        ui["footer"] = tk.Label(inner, text="cargando\u2026", font=fonts["meta"], fg=MUTED, bg=SURF)
+        ui["foot2"] = tk.Label(inner, text="", font=fonts["meta"], fg=MUTED, bg=SURF, wraplength=GW,
+                               justify="center")
+        if cfg["compact"]:
+            tk.Frame(inner, height=px(8), bg=SURF).pack()
+        else:
+            ui["footer"].pack(pady=(px(6), 0))
+            ui["foot2"].pack(pady=(0, px(10)))
+        bind_all(inner)
 
-    s_block = section("SESI\u00d3N 5H")
-    s_week = section("SEMANA \u00b7 7D")
-    s_today = section("HOY")
-    hairline()
-    footer = tk.Label(inner, text="cargando\u2026", font=f_meta, fg=MUTED, bg=SURF)
-    footer.pack(pady=(px(6), 0))
-    foot2 = tk.Label(inner, text="", font=f_meta, fg=MUTED, bg=SURF, wraplength=GW, justify="center")
-    foot2.pack(pady=(0, px(10)))
+    alerted = {}
+
+    def toast(msg):
+        t = tk.Toplevel(root)
+        t.overrideredirect(True)
+        t.attributes("-topmost", True)
+        t.configure(bg=TONES["warning"])
+        tk.Label(t, text=msg, font=fonts["cap"], fg=FG, bg=SURF, padx=px(12), pady=px(8)).pack(padx=1, pady=1)
+        t.update_idletasks()
+        tx = min(max(0, root.winfo_x()), root.winfo_screenwidth() - t.winfo_reqwidth())
+        ty = root.winfo_y() - t.winfo_reqheight() - px(6)
+        t.geometry(f"+{tx}+{ty if ty >= 0 else root.winfo_y() + root.winfo_height() + px(6)}")
+        root.bell()
+        t.after(6000, t.destroy)
+
+    def check_alert(sec, pct, has):
+        """Avisa una vez al cruzar el umbral; rearma al bajar 10 puntos. El primer dato no avisa."""
+        th, key = float(cfg["alert_pct"]), id(sec)
+        if key not in alerted:
+            alerted[key] = has and pct >= th
+            return
+        alerted[key], fire = alert_step(alerted[key], pct, has, th)
+        if fire and cfg["alerts"]:
+            toast(f"{sec['title'].cget('text')}: {pct:.0f}% del l\u00edmite")
 
     def paint(sec, pct, has, val, unit, line1, line2, title=None):
         key, word = tone_for(pct, has)
         color = gauge_color(pct) if has else TONES[key]
-        data, cx, cy = render_ring(GW, GH, pct / 100.0, color, TRACK, SURF, px(8))
+        check_alert(sec, pct, has)
+        if title:
+            sec["title"].config(text=title)
+        if sec.get("compact"):
+            sec["pct"].config(text=f"{min(pct, 999):.0f}%" if has else "\u2013", fg=color)
+            return
+        data, cx, cy = render_ring(ui["GW"], ui["GH"], pct / 100.0, color, TRACK, SURF, px(8))
         sec["img"].put(data, to=(0, 0))
         c = sec["cv"]
         c.delete("all")
@@ -541,8 +694,6 @@ def run_ui():
         if has:
             c.create_text(x0 + fw + px(2), base_y + f_unit.metrics("descent"), text="%", font=f_unit,
                           fill=MUTED, anchor="sw")
-        if title:
-            sec["title"].config(text=title)
         sec["word"].config(text=word, fg=color)
         sec["val"].config(text=val)
         sec["unit"].config(text=unit)
@@ -567,31 +718,33 @@ def run_ui():
               f"{DAYS[t.weekday()]} {t:%H:%M}", src, title)
 
     def apply(d):
+        last["d"] = d
+        footer, foot2 = ui["footer"], ui["foot2"]
         now = datetime.now(timezone.utc)
         rate, meta = d["rate"], d["rate_meta"]
         rb, rw, rf = rate.get("five_hour"), rate.get("seven_day"), rate.get("fable_week")
 
         if rb:  # plan real
-            real(s_block, rb, now, "SESI\u00d3N 5H")
+            real(ui["block"], rb, now, "SESI\u00d3N 5H")
         else:
             pct, has, t2 = local_pct(d["block_work"], cfg["block_limit"], d["peak_block"])
             rem = d["block_remaining"]
-            paint(s_block, pct, has, fmt_tok(d["block_work"]), "tokens",
+            paint(ui["block"], pct, has, fmt_tok(d["block_work"]), "tokens",
                   f"reinicia en {fmt_delta(rem)}" if rem is not None else "sin sesi\u00f3n activa", t2,
                   "SESI\u00d3N 5H")
 
         if rw:
-            real(s_week, rw, now, "SEMANA \u00b7 7D")
+            real(ui["week"], rw, now, "SEMANA \u00b7 7D")
         else:
             pct, has, t2 = local_pct(d["week_work"], cfg["week_limit"], d["peak_week"])
-            paint(s_week, pct, has, fmt_tok(d["week_work"]), "tokens", f"cache {fmt_tok(d['cache_week'])}", t2,
+            paint(ui["week"], pct, has, fmt_tok(d["week_work"]), "tokens", f"cache {fmt_tok(d['cache_week'])}", t2,
                   "SEMANA \u00b7 7D")
 
-        if rf:  # limite semanal independiente de Fable
-            real(s_today, rf, now, "FABLE \u00b7 7D")
-        else:
-            pct, has, t2 = local_pct(d["today_work"], cfg["day_limit"], d["peak_day"])
-            paint(s_today, pct, has, fmt_tok(d["today_work"]), "tokens", f"{d['today_msgs']} mensajes", t2, "HOY")
+        if "fable" in ui:  # opcional: limite semanal independiente de Fable
+            if rf:
+                real(ui["fable"], rf, now, "FABLE \u00b7 7D")
+            else:
+                paint(ui["fable"], 0, False, "\u2013", "sin datos", "", "plan real \u00b7 sin dato", "FABLE \u00b7 7D")
 
         footer.config(text=f"actualizado {datetime.now():%H:%M:%S}")
         if rate:
@@ -620,7 +773,7 @@ def run_ui():
             foot2.config(text=f"no pude leer claude.ai ({reason}) \u00b7 ver fetch.log", fg=TONES["warning"])
 
     # refresco en hilo aparte para no congelar la UI en la primera carga
-    q, state = queue.Queue(), {"busy": False}
+    q, state, last = queue.Queue(), {"busy": False}, {}
 
     def worker():
         try:
@@ -633,7 +786,19 @@ def run_ui():
             state["busy"] = True
             threading.Thread(target=worker, daemon=True).start()
 
+    hq = queue.Queue()
+    start_hotkey(hq)
+    start_tray(hq)
+
     def poll():
+        try:
+            while True:
+                if hq.get_nowait() == "quit":
+                    quit_app()
+                else:
+                    toggle_visible()
+        except queue.Empty:
+            pass
         try:
             while True:
                 kind, d = q.get_nowait()
@@ -641,7 +806,7 @@ def run_ui():
                 if kind == "ok":
                     apply(d)
                 else:
-                    footer.config(text=("error: " + d)[:36])
+                    ui["footer"].config(text=("error: " + d)[:36])
         except queue.Empty:
             pass
         root.after(250, poll)
@@ -681,27 +846,29 @@ def run_ui():
         fstate["next"] = 0.0
         fstate["proc"] = spawn_fetch(login)
 
-    # arrastrar + menu contextual en todos los widgets
+    # arrastrar + menu (hamburguesa y clic derecho) en todos los widgets
     drag = {}
 
     def start_drag(e):
         drag["x"], drag["y"] = e.x_root - root.winfo_x(), e.y_root - root.winfo_y()
 
     def do_drag(e):
-        root.geometry(f"+{e.x_root - drag['x']}+{e.y_root - drag['y']}")
+        if not cfg["locked"]:
+            root.geometry(f"+{e.x_root - drag['x']}+{e.y_root - drag['y']}")
 
     def end_drag(e):
-        cfg["x"], cfg["y"] = root.winfo_x(), root.winfo_y()
-        save_cfg(cfg)
+        if not cfg["locked"]:
+            cfg["x"], cfg["y"] = root.winfo_x(), root.winfo_y()
+            save_cfg(cfg)
 
-    menu = tk.Menu(root, tearoff=0)
-    menu.add_command(label="Actualizar ahora", command=lambda: (_file_cache.clear(), refresh()))
-    menu.add_command(label="Actualizar plan real ahora", command=lambda: fetch_tick(force=True))
-    menu.add_separator()
-    menu.add_command(label="Cerrar", command=root.destroy)
+    def wheel(e):
+        up = e.num == 4 or getattr(e, "delta", 0) > 0
+        resize(rs["target"] * (1.1 if up else 1 / 1.1))
 
     def bind_all(w):
-        if w is not close:
+        for ev in ("<Control-MouseWheel>", "<Control-Button-4>", "<Control-Button-5>"):
+            w.bind(ev, wheel)
+        if str(w.cget("cursor")) != "hand2":  # hamburguesa y cerrar son clicables, no arrastran
             w.bind("<Button-1>", start_drag)
             w.bind("<B1-Motion>", do_drag)
             w.bind("<ButtonRelease-1>", end_drag)
@@ -709,11 +876,132 @@ def run_ui():
         for ch in w.winfo_children():
             bind_all(ch)
 
-    bind_all(root)
+    # opciones persistentes del menu
+    v_top = tk.BooleanVar(value=bool(cfg["topmost"]))
+    v_lock = tk.BooleanVar(value=bool(cfg["locked"]))
+    v_compact = tk.BooleanVar(value=bool(cfg["compact"]))
+    v_fable = tk.BooleanVar(value=bool(cfg["show_fable"]))
+    v_alerts = tk.BooleanVar(value=bool(cfg["alerts"]))
+    v_auto = tk.BooleanVar(value=autostart_get())
+    v_alpha = tk.DoubleVar(value=round(float(cfg["opacity"]), 2))
 
-    # alto segun contenido (o fijo por config), sin salirse de la pantalla
+    def quit_app():
+        if root.state() != "withdrawn" and not cfg["locked"]:
+            cfg["x"], cfg["y"] = root.winfo_x(), root.winfo_y()
+        cfg["scale"] = round(sc["v"], 3)
+        save_cfg(cfg)
+        root.destroy()
+
+    def rebuild():
+        build()
+        if "d" in last:
+            apply(last["d"])
+        relayout()
+
+    def anchor(cx_, cy_):
+        root.update_idletasks()
+        w, h, m = root.winfo_width(), root.winfo_height(), px(24)
+        x = root.winfo_screenwidth() - w - m if cx_ else m
+        y = root.winfo_screenheight() - h - px(48) - m if cy_ else m
+        root.geometry(f"+{x}+{y}")
+        cfg["x"], cfg["y"] = x, y
+        save_cfg(cfg)
+
+    def toggle_visible():
+        if root.state() == "withdrawn":
+            root.deiconify()
+            root.attributes("-topmost", bool(cfg["topmost"]))
+        else:
+            root.withdraw()
+
+    def set_opt(key, var):
+        cfg[key] = var.get()
+        if key == "topmost":
+            root.attributes("-topmost", cfg[key])
+        elif key == "opacity":
+            root.attributes("-alpha", cfg[key])
+        elif key in ("compact", "show_fable"):
+            rebuild()
+        save_cfg(cfg)
+
+    menu = tk.Menu(root, tearoff=0)
+    menu.add_command(label="Actualizar ahora", command=lambda: (_file_cache.clear(), refresh()))
+    menu.add_command(label="Actualizar plan real ahora", command=lambda: fetch_tick(force=True))
+    menu.add_command(label="Conectar con claude.ai\u2026", command=lambda: fetch_tick(force=True, login=True))
+    menu.add_separator()
+    menu.add_checkbutton(label="Siempre visible (encima)", variable=v_top, command=lambda: set_opt("topmost", v_top))
+    menu.add_checkbutton(label="Bloquear posici\u00f3n", variable=v_lock, command=lambda: set_opt("locked", v_lock))
+    m_alpha = tk.Menu(menu, tearoff=0)
+    for a_ in (1.0, 0.9, 0.8, 0.7, 0.5):
+        m_alpha.add_radiobutton(label=f"{a_:.0%}", value=a_, variable=v_alpha, command=lambda: set_opt("opacity", v_alpha))
+    menu.add_cascade(label="Opacidad", menu=m_alpha)
+    m_size = tk.Menu(menu, tearoff=0)
+    for z in (0.75, 1.0, 1.25, 1.5, 2.0):
+        m_size.add_command(label=f"{z:.0%}", command=lambda z=z: resize(z, save=True))
+    menu.add_cascade(label="Tama\u00f1o", menu=m_size)
+    menu.add_checkbutton(label="Modo compacto", variable=v_compact, command=lambda: set_opt("compact", v_compact))
+    menu.add_checkbutton(label="Mostrar gauge de Fable", variable=v_fable,
+                         command=lambda: set_opt("show_fable", v_fable))
+    m_anchor = tk.Menu(menu, tearoff=0)
+    for label, cx_, cy_ in (("Arriba izquierda", 0, 0), ("Arriba derecha", 1, 0),
+                            ("Abajo izquierda", 0, 1), ("Abajo derecha", 1, 1)):
+        m_anchor.add_command(label=label, command=lambda cx_=cx_, cy_=cy_: anchor(cx_, cy_))
+    menu.add_cascade(label="Anclar a esquina", menu=m_anchor)
+    menu.add_separator()
+    menu.add_checkbutton(label="Alertas al superar el umbral", variable=v_alerts,
+                         command=lambda: set_opt("alerts", v_alerts))
+    if sys.platform == "win32":
+        menu.add_checkbutton(label="Iniciar con Windows", variable=v_auto, command=lambda: autostart_set(v_auto.get()))
+        menu.add_command(label="Ocultar (Ctrl+Alt+U)", command=toggle_visible)
+    menu.add_separator()
+    menu.add_command(label="Cerrar", command=quit_app)
+
+    # redimensionar: la escala sube/baja todo junto, asi el aspect ratio se conserva
+    rs = {"pending": False, "target": sc["v"]}
+
+    def relayout():
+        root.update_idletasks()
+        root.geometry(f"{ui['W']}x{root.winfo_reqheight()}")
+
+    def resize(z, save=False):
+        z = min(max(z, SCALE_MIN), SCALE_MAX)
+        rs["target"] = z
+        if save:
+            apply_scale()
+        elif not rs["pending"]:
+            rs["pending"] = True
+            root.after(40, apply_scale)
+
+    def apply_scale():
+        rs["pending"] = False
+        if abs(rs["target"] - sc["v"]) > 0.005:
+            sc["v"] = rs["target"]
+            refont()
+            rebuild()
+        cfg["scale"] = round(sc["v"], 3)
+
+    grip = tk.Label(root, text="\u25e2", font=fonts["meta"], fg=MUTED, bg=SURF, cursor="size_nw_se")
+    grip.place(relx=1.0, rely=1.0, anchor="se", x=-1, y=-1)
+    gs = {}
+
+    def grip_down(e):
+        gs["x"], gs["w0"], gs["w"] = e.x_root, ui["W"], ui["W"] / sc["v"]
+
+    def grip_move(e):
+        resize((gs["w0"] + e.x_root - gs["x"]) / gs["w"])
+
+    def grip_up(e):
+        apply_scale()
+        save_cfg(cfg)
+
+    grip.bind("<Button-1>", grip_down)
+    grip.bind("<B1-Motion>", grip_move)
+    grip.bind("<ButtonRelease-1>", grip_up)
+
+    # el alto sale del contenido (aspect ratio fijo), sin salirse de la pantalla
+    build()
     root.update_idletasks()
-    H = int(cfg["height"]) if int(cfg["height"]) > 0 else root.winfo_reqheight()
+    W, H = ui["W"], root.winfo_reqheight()
     sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
     x = cfg["x"] if cfg["x"] is not None else sw - W - px(24)
     y = cfg["y"] if cfg["y"] is not None else px(24)
