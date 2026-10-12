@@ -407,6 +407,16 @@ def render_ring(w, h, frac, arc_hex, track_hex, bg_hex, stroke_px=8):
     return "{" + "} {".join(rows) + "}", cx, cy
 
 
+def alert_step(armed, pct, has, th):
+    """Histeresis de la alerta. armed = ya aviso (o ya estaba sobre el umbral). Devuelve (armed, avisar)."""
+    over = has and pct >= th
+    if over and not armed:
+        return True, True
+    if not has or pct < th - 10:
+        return False, False
+    return armed, False
+
+
 # ---------- inicio con Windows / atajo global ----------
 RUN_KEY, RUN_NAME = r"Software\Microsoft\Windows\CurrentVersion\Run", "ClaudeUsageWidget"
 
@@ -461,6 +471,25 @@ def start_hotkey(q, mods=0x1 | 0x2 | 0x4000, vk=0x55):
                 q.put("toggle")
 
     threading.Thread(target=loop, daemon=True).start()
+
+
+def start_tray(q):
+    """Icono en la bandeja (opcional: requiere pystray y Pillow). Devuelve True si arranco."""
+    try:
+        import pystray
+        from PIL import Image, ImageDraw
+    except Exception:
+        return False
+    img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.ellipse((6, 6, 58, 58), outline=TONES["accent"], width=8)
+    d.ellipse((24, 26, 30, 32), fill=TONES["accent"])
+    d.ellipse((36, 26, 42, 32), fill=TONES["accent"])
+    menu = pystray.Menu(pystray.MenuItem("Mostrar / ocultar", lambda: q.put("toggle"), default=True),
+                        pystray.MenuItem("Salir", lambda: q.put("quit")))
+    icon = pystray.Icon("claude-usage", img, "Claude usage", menu)
+    icon.run_detached()
+    return True
 
 
 # ---------- UI ----------
@@ -559,7 +588,7 @@ def run_ui():
         tk.Label(head, text="CLAUDE USAGE", font=fonts["title"], fg=FG, bg=SURF).pack(side="left", padx=(px(8), 0))
         close = tk.Label(head, text="\u00d7", font=fonts["close"], fg=MUTED, bg=SURF, cursor="hand2")
         close.pack(side="right")
-        close.bind("<Button-1>", lambda e: root.destroy())
+        close.bind("<Button-1>", lambda e: quit_app())
         close.bind("<Enter>", lambda e: close.config(fg=FG))
         close.bind("<Leave>", lambda e: close.config(fg=MUTED))
 
@@ -636,15 +665,12 @@ def run_ui():
     def check_alert(sec, pct, has):
         """Avisa una vez al cruzar el umbral; rearma al bajar 10 puntos. El primer dato no avisa."""
         th, key = float(cfg["alert_pct"]), id(sec)
-        over = has and pct >= th
         if key not in alerted:
-            alerted[key] = over
-        elif over and not alerted[key]:
-            alerted[key] = True
-            if cfg["alerts"]:
-                toast(f"{sec['title'].cget('text')}: {pct:.0f}% del l\u00edmite")
-        elif not has or pct < th - 10:
-            alerted[key] = False
+            alerted[key] = has and pct >= th
+            return
+        alerted[key], fire = alert_step(alerted[key], pct, has, th)
+        if fire and cfg["alerts"]:
+            toast(f"{sec['title'].cget('text')}: {pct:.0f}% del l\u00edmite")
 
     def paint(sec, pct, has, val, unit, line1, line2, title=None):
         key, word = tone_for(pct, has)
@@ -762,12 +788,15 @@ def run_ui():
 
     hq = queue.Queue()
     start_hotkey(hq)
+    start_tray(hq)
 
     def poll():
         try:
             while True:
-                hq.get_nowait()
-                toggle_visible()
+                if hq.get_nowait() == "quit":
+                    quit_app()
+                else:
+                    toggle_visible()
         except queue.Empty:
             pass
         try:
@@ -856,6 +885,13 @@ def run_ui():
     v_auto = tk.BooleanVar(value=autostart_get())
     v_alpha = tk.DoubleVar(value=round(float(cfg["opacity"]), 2))
 
+    def quit_app():
+        if root.state() != "withdrawn" and not cfg["locked"]:
+            cfg["x"], cfg["y"] = root.winfo_x(), root.winfo_y()
+        cfg["scale"] = round(sc["v"], 3)
+        save_cfg(cfg)
+        root.destroy()
+
     def rebuild():
         build()
         if "d" in last:
@@ -918,7 +954,7 @@ def run_ui():
         menu.add_checkbutton(label="Iniciar con Windows", variable=v_auto, command=lambda: autostart_set(v_auto.get()))
         menu.add_command(label="Ocultar (Ctrl+Alt+U)", command=toggle_visible)
     menu.add_separator()
-    menu.add_command(label="Cerrar", command=root.destroy)
+    menu.add_command(label="Cerrar", command=quit_app)
 
     # redimensionar: la escala sube/baja todo junto, asi el aspect ratio se conserva
     rs = {"pending": False, "target": sc["v"]}
@@ -943,7 +979,6 @@ def run_ui():
             refont()
             rebuild()
         cfg["scale"] = round(sc["v"], 3)
-        save_cfg(cfg)
 
     grip = tk.Label(root, text="\u25e2", font=fonts["meta"], fg=MUTED, bg=SURF, cursor="size_nw_se")
     grip.place(relx=1.0, rely=1.0, anchor="se", x=-1, y=-1)

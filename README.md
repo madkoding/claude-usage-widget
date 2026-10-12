@@ -15,6 +15,7 @@ Widget de escritorio para Windows (Python + tkinter) que muestra tu uso de Claud
 - Siempre encima, bloquear posición, opacidad, tamaño, modo compacto, gauge de Fable, anclar a esquina.
 - Alertas al superar el umbral (`alert_pct`, 80 por defecto) e iniciar con Windows.
 - Redimensiona con la esquina ◢ o Ctrl+rueda (mantiene la proporción). Ctrl+Alt+U oculta/muestra (Windows).
+- Icono en la bandeja si tienes `pip install pystray pillow` (opcional).
 
 ## Instalación
 1. Python 3.9+ para Windows.
