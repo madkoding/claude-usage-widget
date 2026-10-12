@@ -9,15 +9,18 @@ Fuentes de datos:
      %APPDATA%/claude-usage-widget-motita/rate_limits.json (solo suscriptores Pro/Max).
   2) Estimado local: tokens leidos de los logs de Claude Code
      (~/.claude/projects/**/*.jsonl), como % de tu pico de 30 dias.
-  Menu hamburguesa (o clic derecho): siempre encima, bloquear posicion, opacidad, tamano.
-  Se redimensiona arrastrando la esquina inferior derecha (conserva la proporcion).
+  Menu hamburguesa (o clic derecho): siempre encima, bloquear posicion, opacidad, tamano, modo
+  compacto, gauge de Fable (opcional), anclar a esquina, alertas, iniciar con Windows.
+  Se redimensiona arrastrando la esquina inferior derecha o con Ctrl+rueda (conserva la proporcion).
+  Atajo global (Windows): Ctrl+Alt+U oculta/muestra el widget.
   Sin Claude Code local, rate_limits.json (junto al script o en %APPDATA%) se genera leyendo
   claude.ai/settings/usage; las ventanas caducan solas al llegar su hora de reinicio.
 
 Config opcional en %APPDATA%/claude-usage-widget-motita/config.json:
-  {"block_limit": 0, "week_limit": 0, "day_limit": 0,
+  {"block_limit": 0, "week_limit": 0,
    "refresh_s": 30, "fetch_every_s": 300, "opacity": 0.96, "scale": 1.0,
-   "topmost": true, "locked": false,
+   "topmost": true, "locked": false, "compact": false, "show_fable": false,
+   "alerts": true, "alert_pct": 80,
    "extra_roots": ["D:/ruta/a/projects"], "wsl_distro": "Ubuntu"}
   ("wsl_distro" activa leer los logs dentro de WSL; puede arrancar esa distro.)
 
@@ -47,7 +50,8 @@ RATE_PATH = APP_DIR / "rate_limits.json"
 STATUS_PATH = APP_DIR / "fetch_status.json"
 FETCH = HERE / "claude_usage_fetch.py"
 DEFAULTS = {"x": None, "y": None, "refresh_s": 30, "block_limit": 0, "week_limit": 0,
-            "day_limit": 0, "opacity": 0.96, "scale": 1.0, "topmost": True, "locked": False,
+            "opacity": 0.96, "scale": 1.0, "topmost": True, "locked": False, "compact": False,
+            "show_fable": False, "alerts": True, "alert_pct": 80,
             "extra_roots": [], "wsl_distro": "", "fetch_every_s": 300}
 SCALE_MIN, SCALE_MAX = 0.6, 2.5
 
@@ -255,11 +259,10 @@ def compute(cfg=None, now=None):
     block_work = total(active[2])[0] if active else 0
     peak_block = max((total(b[2])[0] for b in blocks), default=0)
 
-    daily, msgs = {}, {}
+    daily = {}
     for e in es:
         d = e[0].astimezone().date()
         daily[d] = daily.get(d, 0) + e[2] + e[3] + e[4]
-        msgs[d] = msgs.get(d, 0) + 1
     today = datetime.now().astimezone().date()
 
     def wsum(d):
@@ -274,9 +277,6 @@ def compute(cfg=None, now=None):
         "week_work": week_work,
         "cache_week": sum(e[5] for e in es if e[0] >= now - timedelta(days=7)),
         "peak_week": max([wsum(d) for d in daily] + [week_work]),
-        "today_work": daily.get(today, 0),
-        "today_msgs": msgs.get(today, 0),
-        "peak_day": max(list(daily.values()) + [0]),
         "rate": rate,
         "rate_meta": meta,
         "sources": len(roots),
@@ -407,6 +407,62 @@ def render_ring(w, h, frac, arc_hex, track_hex, bg_hex, stroke_px=8):
     return "{" + "} {".join(rows) + "}", cx, cy
 
 
+# ---------- inicio con Windows / atajo global ----------
+RUN_KEY, RUN_NAME = r"Software\Microsoft\Windows\CurrentVersion\Run", "ClaudeUsageWidget"
+
+
+def autostart_cmd():
+    if getattr(sys, "frozen", False):
+        return f'"{sys.executable}"'
+    exe = Path(sys.executable)
+    pyw = exe.with_name("pythonw.exe")
+    return f'"{pyw if pyw.exists() else exe}" "{Path(__file__).resolve()}"'
+
+
+def autostart_get():
+    if sys.platform != "win32":
+        return False
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
+            return bool(winreg.QueryValueEx(k, RUN_NAME)[0])
+    except OSError:
+        return False
+
+
+def autostart_set(on):
+    if sys.platform != "win32":
+        return
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
+            if on:
+                winreg.SetValueEx(k, RUN_NAME, 0, winreg.REG_SZ, autostart_cmd())
+            else:
+                winreg.DeleteValue(k, RUN_NAME)
+    except OSError:
+        pass
+
+
+def start_hotkey(q, mods=0x1 | 0x2 | 0x4000, vk=0x55):
+    """Ctrl+Alt+U global (Windows): un hilo con su bucle de mensajes avisa por la cola."""
+    if sys.platform != "win32":
+        return
+
+    def loop():
+        import ctypes
+        from ctypes import wintypes
+        u = ctypes.windll.user32
+        if not u.RegisterHotKey(None, 1, mods, vk):
+            return
+        m = wintypes.MSG()
+        while u.GetMessageW(ctypes.byref(m), None, 0, 0) > 0:
+            if m.message == 0x0312:  # WM_HOTKEY
+                q.put("toggle")
+
+    threading.Thread(target=loop, daemon=True).start()
+
+
 # ---------- UI ----------
 def _enable_dpi():
     if sys.platform == "win32":
@@ -477,7 +533,7 @@ def run_ui():
     def build():
         for ch in inner.winfo_children():
             ch.destroy()
-        ui["W"] = px(248)
+        ui["W"] = px(200 if cfg["compact"] else 248)
         ui["GW"] = GW = ui["W"] - 2 - 2 * px(16)
         ui["GH"] = GH = px(136)
 
@@ -535,19 +591,70 @@ def run_ui():
             d2.pack()
             return {"cv": cv, "img": img, "title": ttl, "word": word, "val": val, "unit": unit, "d1": d1, "d2": d2}
 
-        ui["block"] = section("SESI\u00d3N 5H")
-        ui["week"] = section("SEMANA \u00b7 7D")
+        def line(title):  # modo compacto: titulo y porcentaje en una sola linea
+            hairline()
+            row = tk.Frame(inner, bg=SURF)
+            row.pack(fill="x", padx=px(16), pady=(px(8), px(2)))
+            ttl = tk.Label(row, text=title, font=fonts["label"], fg=MUTED, bg=SURF)
+            ttl.pack(side="left")
+            pct = tk.Label(row, text="\u2013", font=fonts["val"], fg=FG, bg=SURF)
+            pct.pack(side="right")
+            return {"compact": True, "title": ttl, "pct": pct}
+
+        make = line if cfg["compact"] else section
+        ui["block"] = make("SESI\u00d3N 5H")
+        ui["week"] = make("SEMANA \u00b7 7D")
+        ui.pop("fable", None)
+        if cfg["show_fable"]:
+            ui["fable"] = make("FABLE \u00b7 7D")
         hairline()
         ui["footer"] = tk.Label(inner, text="cargando\u2026", font=fonts["meta"], fg=MUTED, bg=SURF)
-        ui["footer"].pack(pady=(px(6), 0))
         ui["foot2"] = tk.Label(inner, text="", font=fonts["meta"], fg=MUTED, bg=SURF, wraplength=GW,
                                justify="center")
-        ui["foot2"].pack(pady=(0, px(10)))
+        if cfg["compact"]:
+            tk.Frame(inner, height=px(8), bg=SURF).pack()
+        else:
+            ui["footer"].pack(pady=(px(6), 0))
+            ui["foot2"].pack(pady=(0, px(10)))
         bind_all(inner)
+
+    alerted = {}
+
+    def toast(msg):
+        t = tk.Toplevel(root)
+        t.overrideredirect(True)
+        t.attributes("-topmost", True)
+        t.configure(bg=TONES["warning"])
+        tk.Label(t, text=msg, font=fonts["cap"], fg=FG, bg=SURF, padx=px(12), pady=px(8)).pack(padx=1, pady=1)
+        t.update_idletasks()
+        tx = min(max(0, root.winfo_x()), root.winfo_screenwidth() - t.winfo_reqwidth())
+        ty = root.winfo_y() - t.winfo_reqheight() - px(6)
+        t.geometry(f"+{tx}+{ty if ty >= 0 else root.winfo_y() + root.winfo_height() + px(6)}")
+        root.bell()
+        t.after(6000, t.destroy)
+
+    def check_alert(sec, pct, has):
+        """Avisa una vez al cruzar el umbral; rearma al bajar 10 puntos. El primer dato no avisa."""
+        th, key = float(cfg["alert_pct"]), id(sec)
+        over = has and pct >= th
+        if key not in alerted:
+            alerted[key] = over
+        elif over and not alerted[key]:
+            alerted[key] = True
+            if cfg["alerts"]:
+                toast(f"{sec['title'].cget('text')}: {pct:.0f}% del l\u00edmite")
+        elif not has or pct < th - 10:
+            alerted[key] = False
 
     def paint(sec, pct, has, val, unit, line1, line2, title=None):
         key, word = tone_for(pct, has)
         color = gauge_color(pct) if has else TONES[key]
+        check_alert(sec, pct, has)
+        if title:
+            sec["title"].config(text=title)
+        if sec.get("compact"):
+            sec["pct"].config(text=f"{min(pct, 999):.0f}%" if has else "\u2013", fg=color)
+            return
         data, cx, cy = render_ring(ui["GW"], ui["GH"], pct / 100.0, color, TRACK, SURF, px(8))
         sec["img"].put(data, to=(0, 0))
         c = sec["cv"]
@@ -561,8 +668,6 @@ def run_ui():
         if has:
             c.create_text(x0 + fw + px(2), base_y + f_unit.metrics("descent"), text="%", font=f_unit,
                           fill=MUTED, anchor="sw")
-        if title:
-            sec["title"].config(text=title)
         sec["word"].config(text=word, fg=color)
         sec["val"].config(text=val)
         sec["unit"].config(text=unit)
@@ -591,7 +696,7 @@ def run_ui():
         footer, foot2 = ui["footer"], ui["foot2"]
         now = datetime.now(timezone.utc)
         rate, meta = d["rate"], d["rate_meta"]
-        rb, rw = rate.get("five_hour"), rate.get("seven_day")
+        rb, rw, rf = rate.get("five_hour"), rate.get("seven_day"), rate.get("fable_week")
 
         if rb:  # plan real
             real(ui["block"], rb, now, "SESI\u00d3N 5H")
@@ -608,6 +713,12 @@ def run_ui():
             pct, has, t2 = local_pct(d["week_work"], cfg["week_limit"], d["peak_week"])
             paint(ui["week"], pct, has, fmt_tok(d["week_work"]), "tokens", f"cache {fmt_tok(d['cache_week'])}", t2,
                   "SEMANA \u00b7 7D")
+
+        if "fable" in ui:  # opcional: limite semanal independiente de Fable
+            if rf:
+                real(ui["fable"], rf, now, "FABLE \u00b7 7D")
+            else:
+                paint(ui["fable"], 0, False, "\u2013", "sin datos", "", "plan real \u00b7 sin dato", "FABLE \u00b7 7D")
 
         footer.config(text=f"actualizado {datetime.now():%H:%M:%S}")
         if rate:
@@ -649,7 +760,16 @@ def run_ui():
             state["busy"] = True
             threading.Thread(target=worker, daemon=True).start()
 
+    hq = queue.Queue()
+    start_hotkey(hq)
+
     def poll():
+        try:
+            while True:
+                hq.get_nowait()
+                toggle_visible()
+        except queue.Empty:
+            pass
         try:
             while True:
                 kind, d = q.get_nowait()
@@ -712,7 +832,13 @@ def run_ui():
             cfg["x"], cfg["y"] = root.winfo_x(), root.winfo_y()
             save_cfg(cfg)
 
+    def wheel(e):
+        up = e.num == 4 or getattr(e, "delta", 0) > 0
+        resize(rs["target"] * (1.1 if up else 1 / 1.1))
+
     def bind_all(w):
+        for ev in ("<Control-MouseWheel>", "<Control-Button-4>", "<Control-Button-5>"):
+            w.bind(ev, wheel)
         if str(w.cget("cursor")) != "hand2":  # hamburguesa y cerrar son clicables, no arrastran
             w.bind("<Button-1>", start_drag)
             w.bind("<B1-Motion>", do_drag)
@@ -724,7 +850,33 @@ def run_ui():
     # opciones persistentes del menu
     v_top = tk.BooleanVar(value=bool(cfg["topmost"]))
     v_lock = tk.BooleanVar(value=bool(cfg["locked"]))
+    v_compact = tk.BooleanVar(value=bool(cfg["compact"]))
+    v_fable = tk.BooleanVar(value=bool(cfg["show_fable"]))
+    v_alerts = tk.BooleanVar(value=bool(cfg["alerts"]))
+    v_auto = tk.BooleanVar(value=autostart_get())
     v_alpha = tk.DoubleVar(value=round(float(cfg["opacity"]), 2))
+
+    def rebuild():
+        build()
+        if "d" in last:
+            apply(last["d"])
+        relayout()
+
+    def anchor(cx_, cy_):
+        root.update_idletasks()
+        w, h, m = root.winfo_width(), root.winfo_height(), px(24)
+        x = root.winfo_screenwidth() - w - m if cx_ else m
+        y = root.winfo_screenheight() - h - px(48) - m if cy_ else m
+        root.geometry(f"+{x}+{y}")
+        cfg["x"], cfg["y"] = x, y
+        save_cfg(cfg)
+
+    def toggle_visible():
+        if root.state() == "withdrawn":
+            root.deiconify()
+            root.attributes("-topmost", bool(cfg["topmost"]))
+        else:
+            root.withdraw()
 
     def set_opt(key, var):
         cfg[key] = var.get()
@@ -732,6 +884,8 @@ def run_ui():
             root.attributes("-topmost", cfg[key])
         elif key == "opacity":
             root.attributes("-alpha", cfg[key])
+        elif key in ("compact", "show_fable"):
+            rebuild()
         save_cfg(cfg)
 
     menu = tk.Menu(root, tearoff=0)
@@ -749,6 +903,20 @@ def run_ui():
     for z in (0.75, 1.0, 1.25, 1.5, 2.0):
         m_size.add_command(label=f"{z:.0%}", command=lambda z=z: resize(z, save=True))
     menu.add_cascade(label="Tama\u00f1o", menu=m_size)
+    menu.add_checkbutton(label="Modo compacto", variable=v_compact, command=lambda: set_opt("compact", v_compact))
+    menu.add_checkbutton(label="Mostrar gauge de Fable", variable=v_fable,
+                         command=lambda: set_opt("show_fable", v_fable))
+    m_anchor = tk.Menu(menu, tearoff=0)
+    for label, cx_, cy_ in (("Arriba izquierda", 0, 0), ("Arriba derecha", 1, 0),
+                            ("Abajo izquierda", 0, 1), ("Abajo derecha", 1, 1)):
+        m_anchor.add_command(label=label, command=lambda cx_=cx_, cy_=cy_: anchor(cx_, cy_))
+    menu.add_cascade(label="Anclar a esquina", menu=m_anchor)
+    menu.add_separator()
+    menu.add_checkbutton(label="Alertas al superar el umbral", variable=v_alerts,
+                         command=lambda: set_opt("alerts", v_alerts))
+    if sys.platform == "win32":
+        menu.add_checkbutton(label="Iniciar con Windows", variable=v_auto, command=lambda: autostart_set(v_auto.get()))
+        menu.add_command(label="Ocultar (Ctrl+Alt+U)", command=toggle_visible)
     menu.add_separator()
     menu.add_command(label="Cerrar", command=root.destroy)
 
@@ -773,11 +941,9 @@ def run_ui():
         if abs(rs["target"] - sc["v"]) > 0.005:
             sc["v"] = rs["target"]
             refont()
-            build()
-            if "d" in last:
-                apply(last["d"])
-            relayout()
+            rebuild()
         cfg["scale"] = round(sc["v"], 3)
+        save_cfg(cfg)
 
     grip = tk.Label(root, text="\u25e2", font=fonts["meta"], fg=MUTED, bg=SURF, cursor="size_nw_se")
     grip.place(relx=1.0, rely=1.0, anchor="se", x=-1, y=-1)
