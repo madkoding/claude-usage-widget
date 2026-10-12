@@ -8,7 +8,7 @@ Widget de escritorio para Windows (Python + tkinter) que muestra tu uso de Claud
 
 ## Qué muestra
 - El anillo cambia de color con el %: verde → verde-amarillo → amarillo → naranja-rojo → rojo.
-- Sesión (5 h), semana (7 d) y Fable semanal, con el % real del plan y el tiempo hasta el reinicio.
+- Sesión (5 h) y semana (7 d), con el % real del plan y el tiempo hasta el reinicio.
 - Si no hay datos reales, estima el uso desde los logs locales de Claude Code frente a tu pico de 30 días.
 
 ## Instalación
